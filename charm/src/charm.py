@@ -11,9 +11,10 @@ import logging
 
 import ops
 import json
-import time
+import os
 
 logger = logging.getLogger(__name__)
+dest_dir = '/opt/collector' # Destination directory for the collector files can be set to any path
 
 SERVICE_TEMPLATE_STRING = \
 """
@@ -61,6 +62,7 @@ class CollectorCharm(ops.CharmBase):
         framework.observe(self.on['start'].action, self._on_service_start)
         framework.observe(self.on['stop'].action, self._on_service_stop)
         framework.observe(self.on['restart'].action, self._on_service_restart)
+        framework.observe(self.on['reload'].action, self._on_reload)
 
     def _on_install(self, event: ops.InstallEvent):
         config = self._get_config()
@@ -128,14 +130,27 @@ class CollectorCharm(ops.CharmBase):
             logger.info(f"Configuration changed: {changed_configs}")
             self._store_config(new_config)
 
-            # Generate the environment file
-            self._generate_environment_file(new_config)
+            if ("release_tag" in changed_configs or "github_repo" in changed_configs or "sub_directory" in changed_configs):
+                # Fetch the collector from GitHub if the release tag, repo or sub-directory has changed
+                try:
+                    self._fetch_collector(new_config)
+                    logger.info("Collector fetched successfully.")
+
+                    self.unit.set_workload_version(new_config.get("release_tag"))
+                except Exception as e:
+                    logger.error(f"Failed to fetch collector: {e}")
+                    self.model.unit.status = ops.BlockedStatus(f"Failed to fetch collector: {e}")
+                    return
+
+            if "haproxy_url" in changed_configs or "haproxy_username" in changed_configs or "haproxy_password" in changed_configs:
+                # Generate the environment file
+                self._generate_environment_file(new_config)
+            
             logger.info("Configuration updated successfully.")
             self._on_service_restart(event)
         else:
             logger.info("No configuration changes detected.")
             self.model.unit.status = ops.ActiveStatus("Running")
-
 
     def _validate_config(self, config: map):
         """Validate the configuration."""
@@ -153,6 +168,14 @@ class CollectorCharm(ops.CharmBase):
             raise ValueError("The 'haproxy-username' configuration option is required.")
         if not config.get("haproxy_password"):
             raise ValueError("The 'haproxy-password' configuration option is required.")
+        if not config.get("github_repo"):
+            raise ValueError("The 'github-repo' configuration option is required.")
+        if not config.get("github_repo").startswith("https://"):
+            raise ValueError("The 'github-repo' must be a valid HTTPS URL.")
+        if not config.get("github_token"):
+            raise ValueError("The 'github-token' configuration option is required.")
+        if not config.get("release_tag"):
+            raise ValueError("The 'release-tag' configuration option is required.")
         
     def _get_config(self) -> dict:
         """Get the configuration as a dictionary."""
@@ -163,36 +186,49 @@ class CollectorCharm(ops.CharmBase):
             "haproxy_url": self.model.config.get("haproxy-url"),
             "haproxy_username": self.model.config.get("haproxy-username"),
             "haproxy_password": self.model.config.get("haproxy-password"),
+            "github_repo": self.model.config.get("github-repo"),
+            "github_token": self.model.config.get("github-token"),
+            "release_tag": self.model.config.get("release-tag"),
+            "sub_directory": self.model.config.get("sub-directory"),
         }
 
     def _on_service_start(self, event: ops.ActionEvent):
         """Start the collector service."""
         self.model.unit.status = ops.MaintenanceStatus("Starting servcice...")
-        time.sleep(5)  # Simulate some delay for maintenance
-        # run(["systemctl", "daemon-reload"])
-        # run(["systemctl", "start", "collector.service"])
+        # Start the service
+        run(["systemctl", "start", "collector.service"], check=True)
+        run(["systemctl", "enable", "collector.service"], check=True)
+        
+        # Start the timer as well
+        run(["systemctl", "start", "collector.timer"], check=True)
+        run(["systemctl", "enable", "collector.timer"], check=True)
         self.model.unit.status = ops.ActiveStatus("Running")
         
     def _on_service_stop(self, event: ops.ActionEvent):
         """Stop the collector service."""
         self.model.unit.status = ops.MaintenanceStatus("Stoping servcice...")
-        time.sleep(5)  # Simulate some delay for maintenance
-        # run(["systemctl", "stop", "collector.service"])
-        # run(["systemctl", "disable", "collector.service"])
+        # Stop the service
+        run(["systemctl", "stop", "collector.service"])
+        run(["systemctl", "disable", "collector.service"])
+
+        # Stop the timer as well
+        run(["systemctl", "stop", "collector.timer"])
+        run(["systemctl", "disable", "collector.timer"])
         self.model.unit.status = ops.BlockedStatus("Stopped")
     
     def _on_service_restart(self, event):
         """Restart the collector service."""
         self.model.unit.status = ops.MaintenanceStatus("Restarting servcice...")
-        time.sleep(5)  # Simulate some delay for maintenance
-        # run(["systemctl", "daemon-reload"])
-        # run(["systemctl", "restart", "collector.service"])
-
-        # run(["systemctl", "daemon-reload"])
-        # run(["systemctl", "start", "collector.timer"])
-        # run(["systemctl", "enable", "collector.timer"])
+        run(["systemctl", "daemon-reload"], check=True)
+        # Restart the service
+        run(["systemctl", "restart", "collector.service"], check=True)
+        run(["systemctl", "enable", "collector.service"], check=True)
         
-        # logger.info("Collector service and timer restarted successfully.")
+        # Restart the timer as well
+        run(["systemctl", "restart", "collector.timer"], check=True)
+        run(["systemctl", "enable", "collector.timer"], check=True)
+        
+        logger.info("Collector service and timer restarted successfully.")
         self.model.unit.status = ops.ActiveStatus("Running")
 
     def _store_config(self, config: dict):
@@ -224,6 +260,136 @@ class CollectorCharm(ops.CharmBase):
             env_file.write(f"HAPROXY_PASSWORD={config['haproxy_password']}\n")
 
         logger.info(f"Environment file created at {env_file_path}")
-    
+
+    def _generate_service_file(self, config: dict):
+        """Generate the service file for the collector."""
+        service_file_path = "/etc/systemd/system/collector.service"
+        entrypoint = f"python3 {dest_dir}/main.py"
+
+        with open(service_file_path, "w") as service_file:
+            service_file.write(SERVICE_TEMPLATE.substitute(entrypoint=entrypoint))
+
+        logger.info(f"Service file created at {service_file_path}")
+
+        # Generate the timer file
+        timer_file_path = "/etc/systemd/system/collector.timer"
+        interval = config.get("frequency")
+
+        with open(timer_file_path, "w") as timer_file:
+            timer_file.write( TIMER_TEMPLATE.substitute(interval=interval))
+
+        logger.info(f"Timer file created at {timer_file_path}")
+
+        # Reload systemd to recognize the new service and timer
+        run(["systemctl", "daemon-reload"], check=True)
+        logger.info("Systemd daemon reloaded to recognize new service and timer.")
+
+    def _install_dependencies(self):
+        """Install necessary dependencies for the collector."""
+        run(["apt", "install", "-y", "python3-pip"])
+        run(["pip3", "install", "-r", f"{dest_dir}/requirements.txt"], check=True)
+
+    def _fetch_collector(self, config: dict):
+        token = config.get("github_token")
+        repo_url = config.get("github_repo")
+        tag = config.get("release_tag")
+        subdir = config.get("sub_directory")
+        clone_dir = "/tmp/collector-repo"
+
+        # Insert token into repo URL
+        parts = repo_url.split("https://", 1)[1]
+        authed_url = f"https://oauth2:{token}@{parts}"
+
+        logger.info("Fetching collector from GitHub...")
+
+        # Clean up if needed
+        run(["rm", "-rf", clone_dir], check=True)
+
+        # Clone with sparse-checkout from a tag
+        run([
+            "git", "clone", "--depth=1", "--filter=blob:none", "--sparse", "--branch", tag,
+            authed_url, clone_dir
+        ], check=True)
+
+        if subdir: # If a sub-directory is specified, set sparse-checkout to that directory
+            logger.info(f"Setting sparse-checkout to sub-directory: {subdir}")
+            run(["git", "-C", clone_dir, "sparse-checkout", "set", subdir], check=True)
+
+        run(["rm", "-rf", dest_dir], check=True)
+
+        logger.info(f"Copying files from {clone_dir}/{subdir} to {dest_dir}...")
+        os.makedirs(dest_dir, exist_ok=True)
+        run(["cp", "-r", f"{clone_dir}/{subdir}/.", dest_dir], check=True)
+
+        logger.info("Collector fetched and copied successfully.")
+
+    def _on_reload(self, event: ops.ActionEvent):
+        """Refresh the collector service."""
+        self.model.unit.status = ops.MaintenanceStatus("Refreshing collector service...")
+        logger.info("Refreshing collector service with new configuration...")
+
+        config = self._get_config()
+
+        # Validate the configuration
+        self.model.unit.status = ops.MaintenanceStatus("Validating configuration...")
+        logger.info("Validating configuration...")
+        self._validate_config(config)
+        logger.info("Configuration validated successfully.")
+        
+        # Store the configuration
+        self.model.unit.status = ops.MaintenanceStatus("Storing configuration...")
+        logger.info("Storing configuration...")
+        self._store_config(config)
+        logger.info("Configuration stored successfully.")
+
+        # Stop the service
+        logger.info("Stopping collector service...")
+        self._on_service_stop(event)
+        logger.info("Collector service stopped successfully.")
+
+        # Fetch the collector from GitHub if needed
+        self.model.unit.status = ops.MaintenanceStatus("Fetching collector from GitHub...")
+        logger.info("Fetching collector from GitHub...")
+        # Fetch the collector from GitHub if needed
+        self._fetch_collector(config)
+        logger.info("Collector fetched successfully.")
+
+        # Install dependencies
+        self.model.unit.status = ops.MaintenanceStatus("Installing dependencies...")
+        logger.info("Installing dependencies...")
+        try:
+            self._install_dependencies()
+            logger.info("Dependencies installed successfully.")
+        except Exception as e:
+            logger.error(f"Failed to install dependencies: {e}")
+            self.model.unit.status = ops.BlockedStatus(f"Dependency installation failed: {e}")
+            return
+
+        # Generate the environment file
+        self.model.unit.status = ops.MaintenanceStatus("Generating environment file...")
+        logger.info("Generating environment file...")
+        self._generate_environment_file(config)
+        logger.info("Environment file generated successfully.")
+
+        # Generate the service file
+        self.model.unit.status = ops.MaintenanceStatus("Generating service file...")
+        logger.info("Generating service file...")
+        self._generate_service_file(config)
+        logger.info("Service file generated successfully.")
+
+        # Set the workload version
+        logger.info("Setting workload version...")
+        self.unit.set_workload_version(config.get("release_tag"))
+        logger.info("Workload version set successfully.")
+
+        # Start the service
+        logger.info("Starting collector service...")
+        self._on_service_start(event)
+        logger.info("Collector service started successfully.")
+
+        # Update the status
+        self.model.unit.status = ops.ActiveStatus("Running")
+        logger.info("Collector service refreshed successfully.")
+
 if __name__ == "__main__":  # pragma: nocover
     ops.main(CollectorCharm)  # type: ignore

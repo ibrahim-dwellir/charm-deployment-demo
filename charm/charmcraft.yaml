@@ -70,6 +70,19 @@ config:
         The frequency in seconds that the collector will run.
       default: 600
       type: int
+    github-token:
+      description: GitHub personal access token for private repo
+      type: string
+    github-repo:
+      description: URL of the GitHub repo containing the collector
+      type: string
+    release-tag:
+      type: string
+      default: v1.0.0
+      description: Tag of the collector repo to fetch
+    sub-directory:
+      description: The sub-directory in the GitHub repository where the collector is located.
+      type: string
 
 actions:
   start:
@@ -77,5 +90,7 @@ actions:
   stop:
     description: Stop the collector
   restart:
+    description: Restart the collector
+  reload:
     description: Restart the collector
 
