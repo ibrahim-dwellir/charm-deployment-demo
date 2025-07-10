@@ -92,5 +92,5 @@ actions:
   restart:
     description: Restart the collector
   reload:
-    description: Restart the collector
+    description: Reload the collector
 
