@@ -6,7 +6,7 @@
 import pytest
 from ops import testing
 
-from charm import CharmCharm
+from charm import CollectorCharm
 
 
 def mock_get_version():
@@ -17,7 +17,7 @@ def mock_get_version():
 def test_start(monkeypatch: pytest.MonkeyPatch):
     """Test that the charm has the correct state after handling the start event."""
     # Arrange:
-    ctx = testing.Context(CharmCharm)
+    ctx = testing.Context(CollectorCharm)
     monkeypatch.setattr("charm.workload.get_version", mock_get_version)
     # Act:
     state_out = ctx.run(ctx.on.start(), testing.State())
